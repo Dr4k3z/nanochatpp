@@ -1,425 +1,404 @@
-#include "../headers/tensor/tensor.h"
 #include <gtest/gtest.h>
 
 #include <array>
-#include <cstddef>
-#include <cstdint>
 #include <limits>
-#include <memory>
-#include <numeric>
+#include <string>
 #include <type_traits>
-
+#include <utility>
+#include "../headers/tensor/tensor.h"
 
 using NanoChat::Tensor;
 using NanoChat::TensorError;
 using NanoChat::TensorException;
 
-template<typename Operation>
-void expect_tensor_error(Operation operation, TensorError code) {
-    try {
-        operation();
-        FAIL() << "Expected TensorException";
-    } catch (const TensorException& error) {
-        EXPECT_EQ(error.code(), code);
-        EXPECT_NE(std::string(error.what()).size(), 0u);
+namespace {
+    template<typename Operation>
+    void expect_tensor_error(Operation operation, TensorError code, const char* message) {
+        try {
+            operation();
+            FAIL() << "Expected TensorException";
+        } catch (const TensorException& error) {
+            EXPECT_EQ(error.code(), code);
+            EXPECT_STREQ(error.what(), message);
+        }
     }
-}
 
-TEST(TensorFactory, VariadicAndShapeFactoryAgree) {
-    auto variadic = Tensor<>::create(2, 3, 4);
-    Tensor<>::Shape shape{2, 3, 4};
-    auto from_shape = Tensor<>::create(shape);
-    EXPECT_EQ(variadic.shape(), from_shape.shape());
-    EXPECT_EQ(variadic.strides(), from_shape.strides());
-    EXPECT_EQ(variadic.numel(), 24u);
-    EXPECT_EQ(variadic.strides(), (Tensor<>::Shape{12, 4, 1}));
-    for (float x: variadic.data())
-        EXPECT_FLOAT_EQ(x, 0.0f);
-}
-
-TEST(TensorFactory, SupportsDifferentScalarTypes) {
-    auto tensor = Tensor<double>::create(2u, std::size_t{3});
-    static_assert(std::is_same_v<decltype(tensor.data()[0]), double&>);
-    EXPECT_EQ(tensor.numel(), 6u);
-}
-
-TEST(TensorFactory, RejectsNegativeDimensions) {
-    expect_tensor_error([] { Tensor<>::create(2, -1, 4); }, TensorError::InvalidDimension);
-}
-TEST(TensorFactory, DetectsSizeOverflow) {
-    expect_tensor_error([] { Tensor<>::create(NanoChat::Shape{std::numeric_limits<std::size_t>::max(), 2}); },
-                        TensorError::SizeOverflow);
-}
-
-TEST(TensorFactory, SupportsEmptyAxes) {
-    auto result = Tensor<>::create(2, 0, 3);
-    EXPECT_EQ(result.numel(), 0u);
-    EXPECT_EQ(result.shape(), (Tensor<>::Shape{2, 0, 3}));
-    EXPECT_TRUE(result.data().empty());
-}
-
-TEST(TensorFactory, SupportsScalarShape) {
-    auto result = Tensor<>::create(Tensor<>::Shape{});
-    EXPECT_EQ(result.ndim(), 0u);
-    EXPECT_EQ(result.numel(), 1u);
-}
-
-TEST(TensorIndexing, MutableAndConstRead) {
-    auto result = Tensor<>::create(2, 3, 4);
-    auto& tensor = result;
-    auto element = tensor[1, 2, 3];
-    element.get() = 7.5f;
-    const auto& readonly = tensor;
-    auto value = readonly[1, 2, 3];
-    EXPECT_FLOAT_EQ(value.get(), 7.5f);
-    EXPECT_FLOAT_EQ(tensor.data()[23], 7.5f);
-}
-
-TEST(TensorIndexing, RejectsInvalidIndices) {
-    auto result = Tensor<>::create(2, 3);
-    auto& tensor = result;
-    EXPECT_EQ(tensor[1].ndim(), 1u);
-    EXPECT_THROW((tensor[1].get()), TensorException);
-    EXPECT_THROW((tensor[1, 0, 0]), TensorException);
-    EXPECT_THROW((tensor[2, 0]), TensorException);
-    EXPECT_THROW((tensor[-1, 0]), TensorException);
-}
-
-TEST(TensorArithmetic, ElementwiseOperations) {
-    auto a = Tensor<>::create(2, 2);
-    auto b = Tensor<>::create(2, 2);
-    for (std::size_t i = 0; i < 4; ++i) {
-        a.data()[i] = static_cast<float>(i + 1);
-        b.data()[i] = 2.0f;
+    Tensor<int> sequence() {
+        Tensor<int> tensor(2, 3, 4);
+        for (int i = 0; i < 2; ++i)
+            for (int j = 0; j < 3; ++j)
+                for (int k = 0; k < 4; ++k)
+                    tensor[i, j, k].get() = i * 12 + j * 4 + k;
+        return tensor;
     }
-    auto sum = a + b;
-    auto diff = a - b;
-    auto product = a * b;
-    auto negative = -a;
-    EXPECT_FLOAT_EQ(sum.data()[3], 6.0f);
-    EXPECT_FLOAT_EQ(diff.data()[3], 2.0f);
-    EXPECT_FLOAT_EQ(product.data()[3], 8.0f);
-    EXPECT_FLOAT_EQ(negative.data()[3], -4.0f);
+} // namespace
+
+TEST(TensorConstruction, ShapeAndDimensionsAgreeAndInitializeToZero) {
+    Tensor<> dimensions(2, 3, 4);
+    Tensor<> shape(Tensor<>::Shape{2, 3, 4});
+    EXPECT_EQ(dimensions.get_shape(), shape.get_shape());
+    EXPECT_EQ(dimensions.get_strides(), (Tensor<>::Shape{12, 4, 1}));
+    EXPECT_EQ(dimensions.get_ndim(), 3u);
+    EXPECT_EQ(dimensions.get_numel(), 24u);
+    EXPECT_TRUE(dimensions.is_contiguous());
+    for (int i = 0; i < 2; ++i)
+        for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 4; ++k)
+                EXPECT_FLOAT_EQ((shape[i, j, k].get()), 0.0f);
 }
 
-TEST(TensorArithmetic, RejectsIncompatibleShapes) {
-    auto a = Tensor<>::create(2, 3);
-    auto b = Tensor<>::create(3, 2);
-    expect_tensor_error([&] { static_cast<void>(a + b); }, TensorError::IncompatibleShapes);
+TEST(TensorConstruction, SupportsScalarTypesAndMixedIntegralDimensions) {
+    Tensor<double> tensor(2u, std::size_t{3});
+    tensor[1, 2].get() = 1.25;
+    static_assert(std::is_convertible_v<decltype(tensor[1, 2].get()), double>);
+    EXPECT_DOUBLE_EQ((tensor[1, 2].get()), 1.25);
+    Tensor<int> integers(1);
+    integers[0].get() = 7;
+    EXPECT_EQ(integers[0].get(), 7);
 }
 
-TEST(TensorIndexing, PrefixViewsAliasRowMajorStorage) {
-    auto tensor = Tensor<>::create(2, 3, 4);
-    tensor[1].matrix().setConstant(2.0f);
-    tensor[1, 2].vector()[3] = 7.0f;
-    EXPECT_FLOAT_EQ((tensor[1, 2, 3].get()), 7.0f);
-    EXPECT_FLOAT_EQ(tensor[1][2][3].get(), 7.0f);
-    EXPECT_FLOAT_EQ(tensor.data()[23], 7.0f);
-    EXPECT_FLOAT_EQ((tensor[0, 2, 3].get()), 0.0f);
-    EXPECT_EQ(tensor[1].matrix().rows(), 3);
-    EXPECT_EQ(tensor[1].matrix().cols(), 4);
-    EXPECT_THROW(tensor[1].vector(), TensorException);
-    EXPECT_THROW((tensor[1, 2].matrix()), TensorException);
-    const auto& readonly = tensor;
-    static_assert(std::is_same_v<decltype(readonly[1, 2, 3].get()), const float&>);
-    static_assert(std::is_const_v<std::remove_reference_t<decltype(readonly[1].matrix()(0, 0))>>);
+TEST(TensorConstruction, SupportsRankZeroAndEmptyAxes) {
+    Tensor<int> scalar(Tensor<int>::Shape{});
+    EXPECT_EQ(scalar.get_ndim(), 0u);
+    EXPECT_EQ(scalar.get_numel(), 1u);
+    scalar.get() = 9;
+    EXPECT_EQ(scalar.get(), 9);
+    Tensor<int> empty(2, 0, 3);
+    EXPECT_EQ(empty.get_shape(), (Tensor<int>::Shape{2, 0, 3}));
+    EXPECT_EQ(empty.get_numel(), 0u);
+    EXPECT_TRUE(empty.is_contiguous());
+    EXPECT_EQ(empty.clone().get_numel(), 0u);
+    EXPECT_EQ(empty.transpose(0, 2).get_shape(), (Tensor<int>::Shape{3, 0, 2}));
+    EXPECT_EQ(empty.reshape({0, 6}).get_shape(), (Tensor<int>::Shape{0, 6}));
 }
 
-TEST(TensorIndexing, EmptySlicesAndScalarTensors) {
-    auto empty = Tensor<>::create(2, 0, 3);
-    EXPECT_TRUE(empty[1].data().empty());
-    EXPECT_EQ(empty[1].matrix().rows(), 0);
-    EXPECT_THROW((empty[1, 0]), TensorException);
-    auto scalar = Tensor<>::create(Tensor<>::Shape{});
-    scalar[].get() = 3.0f;
-    EXPECT_FLOAT_EQ(scalar[].get(), 3.0f);
-    EXPECT_THROW(scalar[0], TensorException);
+TEST(TensorConstruction, RejectsNegativeDimensionsAndOverflow) {
+    expect_tensor_error([] { Tensor<> tensor(2, -1); }, TensorError::InvalidDimension, "Invalid tensor dimension");
+    expect_tensor_error([] { Tensor<> tensor(Tensor<>::Shape{std::numeric_limits<std::size_t>::max(), 2}); },
+                        TensorError::SizeOverflow, "Tensor element count overflow");
+    expect_tensor_error([] { Tensor<> tensor(Tensor<>::Shape{0, std::numeric_limits<std::size_t>::max(), 2}); },
+                        TensorError::SizeOverflow, "Tensor stride overflow");
+    expect_tensor_error([] { Tensor<> tensor(Tensor<>::Shape{std::numeric_limits<std::size_t>::max()}); },
+                        TensorError::SizeOverflow, "Tensor exceeds Eigen index range");
 }
 
-TEST(TensorLayout, TransposeAliasesStorageAndOwnsMetadata) {
-    auto tensor = Tensor<int>::create(2, 3);
-    for (std::size_t i = 0; i < tensor.numel(); ++i)
-        tensor.data()[i] = static_cast<int>(i);
-    auto transposed = tensor.transpose();
-    EXPECT_EQ(transposed.shape(), (NanoChat::Shape{3, 2}));
-    EXPECT_EQ(transposed.strides(), (NanoChat::Shape{1, 3}));
-    EXPECT_EQ(tensor.shape(), (NanoChat::Shape{2, 3}));
-    EXPECT_EQ(tensor.strides(), (NanoChat::Shape{3, 1}));
-    EXPECT_FALSE(transposed.is_contiguous());
-    EXPECT_EQ((transposed[2, 1].get()), 5);
-    transposed[2, 1].get() = 42;
-    EXPECT_EQ((tensor[1, 2].get()), 42);
-    auto row = tensor.transpose()[1]; // Intermediate metadata has already been destroyed.
-    EXPECT_EQ(row.vector()[1], 4);
-    row.vector()[1] = 17;
-    EXPECT_EQ((tensor[1, 1].get()), 17);
-    EXPECT_EQ(transposed.matrix()(2, 1), 42);
-    transposed.matrix()(0, 1) = 19;
-    EXPECT_EQ((tensor[1, 0].get()), 19);
-    EXPECT_TRUE(transposed.transpose().is_contiguous());
-    EXPECT_THROW(transposed.data(), TensorException);
-    EXPECT_THROW(static_cast<void>(tensor.transpose(0, 2)), TensorException);
+TEST(TensorIndexing, PrefixSlicesAndChainedIndicesShareStorage) {
+    auto tensor = sequence();
+    auto matrix = tensor[1];
+    auto vector = matrix[2];
+    EXPECT_EQ(matrix.get_shape(), (Tensor<int>::Shape{3, 4}));
+    EXPECT_EQ(matrix.get_strides(), (Tensor<int>::Shape{4, 1}));
+    EXPECT_EQ(vector.get_shape(), (Tensor<int>::Shape{4}));
+    EXPECT_EQ(vector[3].get(), 23);
+    vector[3].get() = 99;
+    EXPECT_EQ((tensor[1, 2, 3].get()), 99);
+    EXPECT_EQ(tensor[1][2][3].get(), 99);
+    EXPECT_EQ((tensor[0, 2, 3].get()), 11);
+    EXPECT_EQ((tensor[1, 2, 3].get_ndim()), 0u);
 }
 
-TEST(TensorLayout, ThreeDimensionalStridedSlices) {
-    auto tensor = Tensor<int>::create(2, 3, 4);
-    for (std::size_t i = 0; i < tensor.numel(); ++i)
-        tensor.data()[i] = static_cast<int>(i);
+TEST(TensorIndexing, RejectsWrongRankNegativeAndOutOfRangeIndices) {
+    Tensor<int> tensor(2, 3);
+    expect_tensor_error([&] { static_cast<void>(tensor[0, 0, 0]); }, TensorError::IndexOutOfBounds,
+                        "Too many indices for tensor rank");
+    expect_tensor_error([&] { static_cast<void>(tensor[-1, 0]); }, TensorError::IndexOutOfBounds,
+                        "Tensor index cannot be negative or exceed size_t");
+    expect_tensor_error([&] { static_cast<void>(tensor[0, 3]); }, TensorError::IndexOutOfBounds,
+                        "Tensor index exceeds dimension");
+    expect_tensor_error([&] { static_cast<void>(tensor[2, 0]); }, TensorError::IndexOutOfBounds,
+                        "Tensor index exceeds dimension");
+    expect_tensor_error([&] { static_cast<void>(tensor.get()); }, TensorError::InvalidShape,
+                        "get() requires a rank-zero tensor");
+    Tensor<int> empty(2, 0, 3);
+    expect_tensor_error([&] { static_cast<void>(empty[0, 0]); }, TensorError::IndexOutOfBounds,
+                        "Tensor index exceeds dimension");
+}
+
+TEST(TensorOwnership, CopiesAndAssignmentsShareStorageButKeepTheirOwnMetadata) {
+    auto tensor = sequence();
+    auto copy = tensor;
+    auto reshaped = copy.reshape({6, 4});
+    reshaped[5, 3].get() = 42;
+    EXPECT_EQ((tensor[1, 2, 3].get()), 42);
+    EXPECT_EQ(copy.get_shape(), (Tensor<int>::Shape{2, 3, 4}));
+    Tensor<int> assigned(1);
+    assigned = tensor;
+    assigned[0, 0, 0].get() = 17;
+    EXPECT_EQ((tensor[0, 0, 0].get()), 17);
+}
+
+TEST(TensorOwnership, SlicesSurviveSourceDestructionReassignmentAndTemporaries) {
+    auto slice = [] { return sequence()[1]; }();
+    EXPECT_EQ((slice[2, 3].get()), 23);
+    auto tensor = sequence();
+    auto retained = tensor[1, 2];
+    tensor = Tensor<int>(1);
+    EXPECT_EQ(retained[3].get(), 23);
+    auto temporarySlice = sequence().transpose(0, 2)[3];
+    EXPECT_EQ((temporarySlice[2, 1].get()), 23);
+    retained[3].get() = 81;
+    EXPECT_EQ(retained[3].get(), 81);
+}
+
+TEST(TensorOwnership, CloneIsIndependentForBothContiguousAndStridedData) {
+    auto tensor = sequence();
+    auto copy = tensor.clone();
+    copy[1, 2, 3].get() = 70;
+    EXPECT_EQ((tensor[1, 2, 3].get()), 23);
     auto transposed = tensor.transpose(0, 2);
-    EXPECT_EQ(transposed.shape(), (NanoChat::Shape{4, 3, 2}));
+    auto packed = transposed.clone();
+    EXPECT_TRUE(packed.is_contiguous());
+    EXPECT_EQ(packed.get_shape(), transposed.get_shape());
+    EXPECT_EQ(packed.get_strides(), (Tensor<int>::Shape{6, 2, 1}));
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 2; ++k)
+                EXPECT_EQ((packed[i, j, k].get()), (tensor[k, j, i].get()));
+    packed[3, 2, 1].get() = 100;
+    EXPECT_EQ((tensor[1, 2, 3].get()), 23);
+    auto offsetCopy = tensor[1, 2].clone();
+    EXPECT_EQ(offsetCopy[0].get(), 20);
+    offsetCopy[3].get() = 50;
+    EXPECT_EQ((tensor[1, 2, 3].get()), 23);
+}
+
+TEST(TensorLayout, TransposeSwapsAxesAndPreservesOffsets) {
+    auto tensor = sequence();
+    auto transposed = tensor.transpose(0, 2);
+    EXPECT_EQ(transposed.get_shape(), (Tensor<int>::Shape{4, 3, 2}));
+    EXPECT_EQ(transposed.get_strides(), (Tensor<int>::Shape{1, 4, 12}));
+    EXPECT_FALSE(transposed.is_contiguous());
     EXPECT_EQ((transposed[3, 2, 1].get()), 23);
-    EXPECT_EQ(transposed[3].matrix()(2, 1), 23);
-    auto vector = transposed[3, 2];
-    EXPECT_EQ(vector.vector()[0], 11);
-    EXPECT_EQ(vector.vector()[1], 23);
-    EXPECT_THROW(static_cast<void>(tensor.transpose()), TensorException);
-    auto copy = transposed.contiguous();
-    for (std::size_t i = 0; i < 4; ++i)
-        for (std::size_t j = 0; j < 3; ++j)
-            for (std::size_t k = 0; k < 2; ++k)
-                EXPECT_EQ((copy[i, j, k].get()), (tensor[k, j, i].get()));
+    transposed[3, 2, 1].get() = 60;
+    EXPECT_EQ((tensor[1, 2, 3].get()), 60);
+    EXPECT_EQ(tensor.get_shape(), (Tensor<int>::Shape{2, 3, 4}));
+    EXPECT_TRUE(transposed.transpose(0, 2).is_contiguous());
+    EXPECT_EQ(tensor.transpose(1, 1).get_strides(), tensor.get_strides());
+    auto matrix = tensor[1].transpose(0, 1);
+    EXPECT_EQ((matrix[3, 2].get()), 60);
+    expect_tensor_error([&] { static_cast<void>(tensor.transpose(0, 3)); }, TensorError::IndexOutOfBounds,
+                        "Transpose axes outside rank");
 }
 
-TEST(TensorLayout, ReshapeBorrowsElementsAndOwnsMetadata) {
-    auto tensor = Tensor<double>::create(2, 3, 4);
-    auto reshaped = tensor.reshape(4, 6);
-    EXPECT_EQ(reshaped.shape(), (NanoChat::Shape{4, 6}));
-    EXPECT_EQ(reshaped.data().data(), tensor.data().data());
-    EXPECT_TRUE(reshaped.is_contiguous());
-    reshaped[3, 5].get() = 9.0;
-    EXPECT_DOUBLE_EQ((tensor[1, 2, 3].get()), 9.0);
-    auto chained = tensor.reshape(4, 6).transpose()[5];
-    EXPECT_DOUBLE_EQ(chained.vector()[3], 9.0);
-    EXPECT_EQ(tensor.shape(), (NanoChat::Shape{2, 3, 4}));
-    EXPECT_THROW(static_cast<void>(tensor.reshape(5, 5)), TensorException);
-    EXPECT_THROW(static_cast<void>(tensor.reshape(-1, 24)), TensorException);
-    EXPECT_THROW(static_cast<void>(tensor.reshape(std::numeric_limits<std::size_t>::max(), 2)), TensorException);
-    EXPECT_THROW(static_cast<void>(tensor.transpose(0, 2).reshape(24)), TensorException);
+TEST(TensorLayout, PermuteReordersAllAxesAndSharesData) {
+    auto tensor = sequence();
+    auto permuted = tensor.permute(std::array<std::size_t, 3>{2, 0, 1});
+    EXPECT_EQ(permuted.get_shape(), (Tensor<int>::Shape{4, 2, 3}));
+    EXPECT_EQ(permuted.get_strides(), (Tensor<int>::Shape{1, 12, 4}));
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 2; ++j)
+            for (int k = 0; k < 3; ++k)
+                EXPECT_EQ((permuted[i, j, k].get()), (tensor[j, k, i].get()));
+    permuted[3, 1, 2].get() = 80;
+    EXPECT_EQ((tensor[1, 2, 3].get()), 80);
+    auto restored = permuted.permute(std::array<std::size_t, 3>{1, 2, 0});
+    EXPECT_EQ(restored.get_shape(), tensor.get_shape());
+    EXPECT_TRUE(restored.is_contiguous());
+    auto offset = tensor[1].permute(std::array<std::size_t, 2>{1, 0});
+    EXPECT_EQ((offset[3, 2].get()), 80);
+    Tensor<int> scalar(Tensor<int>::Shape{});
+    EXPECT_EQ(scalar.permute(std::array<std::size_t, 0>{}).get_numel(), 1u);
 }
 
-TEST(TensorLayout, ContiguousMaterializesLogicalOrder) {
-    auto tensor = Tensor<int>::create(2, 3);
-    for (std::size_t i = 0; i < tensor.numel(); ++i)
-        tensor.data()[i] = static_cast<int>(i);
-    auto copy = tensor.transpose().contiguous();
-    EXPECT_EQ(copy.shape(), (NanoChat::Shape{3, 2}));
-    EXPECT_EQ(copy.strides(), (NanoChat::Shape{2, 1}));
-    EXPECT_TRUE(copy.is_contiguous());
-    EXPECT_EQ(std::vector<int>(copy.data().begin(), copy.data().end()), (std::vector<int>{0, 3, 1, 4, 2, 5}));
-    copy[0, 0].get() = 99;
-    EXPECT_EQ((tensor[0, 0].get()), 0);
-    auto rowCopy = tensor.transpose()[1].contiguous();
-    EXPECT_EQ(rowCopy.shape(), (NanoChat::Shape{2}));
-    EXPECT_EQ(rowCopy.data()[0], 1);
-    EXPECT_EQ(rowCopy.data()[1], 4);
-    Tensor<int> explicitCopy(tensor.transpose());
-    EXPECT_EQ((explicitCopy[2, 1].get()), 5);
-    auto ownedCopy = tensor.contiguous();
-    EXPECT_NE(ownedCopy.data().data(), tensor.data().data());
-    const auto* address = ownedCopy.data().data();
-    auto moved = std::move(ownedCopy).contiguous();
-    EXPECT_EQ(moved.data().data(), address);
-    auto flat = copy.reshape(6);
-    EXPECT_EQ(flat.shape(), (NanoChat::Shape{6}));
+TEST(TensorLayout, RejectsIncompleteDuplicateAndOutOfRangePermutations) {
+    Tensor<int> tensor(2, 3, 4);
+    expect_tensor_error([&] { static_cast<void>(tensor.permute(std::array<std::size_t, 2>{0, 1})); },
+                        TensorError::InvalidShape, "Permutation must include every axis");
+    expect_tensor_error([&] { static_cast<void>(tensor.permute(std::array<std::size_t, 3>{0, 0, 2})); },
+                        TensorError::InvalidShape, "Duplicate permutation axis");
+    expect_tensor_error([&] { static_cast<void>(tensor.permute(std::array<std::size_t, 3>{0, 1, 3})); },
+                        TensorError::IndexOutOfBounds, "Permutation axis outside rank");
 }
 
-TEST(TensorLayout, ConstViewsAndIndependentOwnerLifetime) {
-    const auto tensor = Tensor<double>::create(2, 3);
-    static_assert(std::is_same_v<decltype(tensor.view()), NanoChat::TensorView<const double>>);
-    static_assert(std::is_same_v<decltype(tensor.transpose()), NanoChat::TensorView<const double>>);
-    static_assert(std::is_same_v<decltype(tensor.reshape(6)), NanoChat::TensorView<const double>>);
-    static_assert(std::is_same_v<decltype(tensor.transpose().contiguous()), Tensor<double>>);
-    static_assert(std::is_same_v<decltype(tensor.transpose()[0, 0].get()), const double&>);
-    static_assert(std::is_const_v<std::remove_reference_t<decltype(tensor.transpose().matrix()(0, 0))>>);
-    auto copy = [] {
-        auto source = Tensor<int>::create(2, 3);
-        source[1, 2].get() = 8;
-        return source.transpose().contiguous();
-    }();
-    EXPECT_EQ((copy[2, 1].get()), 8);
+TEST(TensorLayout, ContiguousReshapeSharesStorageIncludingSliceOffsets) {
+    auto tensor = sequence();
+    auto reshaped = tensor.reshape({6, 4});
+    EXPECT_EQ(reshaped.get_strides(), (Tensor<int>::Shape{4, 1}));
+    reshaped[5, 3].get() = 51;
+    EXPECT_EQ((tensor[1, 2, 3].get()), 51);
+    auto offset = tensor[1].reshape({12});
+    EXPECT_EQ(offset[0].get(), 12);
+    offset[11].get() = 71;
+    EXPECT_EQ((tensor[1, 2, 3].get()), 71);
+    Tensor<int> scalar(Tensor<int>::Shape{});
+    scalar.get() = 9;
+    auto vector = scalar.reshape({1});
+    vector[0].get() = 10;
+    EXPECT_EQ(scalar.get(), 10);
+    EXPECT_EQ(vector.reshape({}).get(), 10);
+    expect_tensor_error([&] { static_cast<void>(tensor.reshape({25})); }, TensorError::InvalidShape,
+                        "Reshape must preserve the number of elements");
 }
 
-TEST(TensorLayout, SingletonEmptyAndScalarLayouts) {
-    auto singleton = Tensor<int>::create(1, 3);
-    EXPECT_TRUE(singleton.transpose().is_contiguous());
-    EXPECT_EQ(singleton.transpose().reshape(3).numel(), 3u);
-    auto empty = Tensor<int>::create(2, 0, 3);
-    auto transposed = empty.transpose(0, 2);
-    EXPECT_TRUE(transposed.is_contiguous());
-    EXPECT_TRUE(transposed[1].data().empty());
-    EXPECT_EQ(transposed.contiguous().shape(), (NanoChat::Shape{3, 0, 2}));
-    EXPECT_EQ(transposed.reshape(0, 6).numel(), 0u);
-    auto scalar = Tensor<int>::create(NanoChat::Shape{});
-    scalar[].get() = 7;
-    EXPECT_EQ(scalar.reshape(1).contiguous().data()[0], 7);
-    EXPECT_EQ(scalar.reshape(1).reshape({}).get(), 7);
-    auto scalarCopy = scalar.view().contiguous();
-    EXPECT_EQ(scalarCopy[].get(), 7);
+TEST(TensorLayout, StridedReshapeCopiesInLogicalOrder) {
+    auto tensor = sequence();
+    auto flat = tensor[1].transpose(0, 1).reshape({12});
+    const std::array expected{12, 16, 20, 13, 17, 21, 14, 18, 22, 15, 19, 23};
+    EXPECT_TRUE(flat.is_contiguous());
+    for (int i = 0; i < 12; ++i)
+        EXPECT_EQ(flat[i].get(), expected[i]);
+    flat[0].get() = 100;
+    EXPECT_EQ((tensor[1, 0, 0].get()), 12);
 }
 
-TEST(TensorLayout, RejectsInvalidBorrowedLayouts) {
-    std::vector<float> storage(6);
-    const NanoChat::Shape shape{2, 3};
-    const NanoChat::Shape shortStrides{1};
-    EXPECT_THROW((NanoChat::TensorView<float>(storage, shape, shortStrides)), TensorException);
-    const NanoChat::Shape invalidStrides{4, 1};
-    EXPECT_THROW((NanoChat::TensorView<float>(storage, shape, invalidStrides)), TensorException);
-    const NanoChat::Shape broadcastStrides{0, 1};
-    EXPECT_THROW((NanoChat::TensorView<float>(storage, shape, broadcastStrides)), TensorException);
-    const NanoChat::Shape emptyShape{2, 0};
-    const NanoChat::Shape emptyStrides{0, 1};
-    auto empty = NanoChat::TensorView<float>(storage, emptyShape, emptyStrides);
-    EXPECT_TRUE(empty.data().empty());
+TEST(TensorLayout, MakeContiguousSharesPackedStorageAndCopiesStridedStorage) {
+    auto tensor = sequence();
+    auto shared = tensor.make_contiguous();
+    shared[0, 0, 0].get() = 30;
+    EXPECT_EQ((tensor[0, 0, 0].get()), 30);
+    auto slice = tensor[1].make_contiguous();
+    slice[2, 3].get() = 40;
+    EXPECT_EQ((tensor[1, 2, 3].get()), 40);
+    auto packed = tensor.transpose(0, 2).make_contiguous();
+    EXPECT_TRUE(packed.is_contiguous());
+    EXPECT_EQ((packed[3, 2, 1].get()), 40);
+    packed[3, 2, 1].get() = 90;
+    EXPECT_EQ((tensor[1, 2, 3].get()), 40);
+    Tensor<int> singleton(1, 3);
+    EXPECT_TRUE(singleton.transpose(0, 1).is_contiguous());
 }
 
-template<typename T>
-concept CanBorrowTemporary = requires(T tensor) { std::move(tensor).view(); };
-template<typename T>
-concept CanTransposeTemporary = requires(T tensor) { std::move(tensor).transpose(); };
-template<typename T>
-concept CanReshapeTemporary = requires(T tensor) { std::move(tensor).reshape(1); };
-static_assert(!CanBorrowTemporary<Tensor<float>>);
-static_assert(!CanBorrowTemporary<const Tensor<float>>);
-static_assert(!CanTransposeTemporary<Tensor<float>>);
-static_assert(!CanTransposeTemporary<const Tensor<float>>);
-static_assert(!CanReshapeTemporary<Tensor<float>>);
-static_assert(!CanReshapeTemporary<const Tensor<float>>);
-
-TEST(TensorErrors, OwnersAndViewsUseIdenticalErrorCodes) {
-    auto tensor = Tensor<float>::create(2, 3);
-    auto view = tensor.view();
-    const auto check = [&](auto& value) {
-        expect_tensor_error([&] { static_cast<void>(value[2, 0]); }, TensorError::IndexOutOfBounds);
-        expect_tensor_error([&] { static_cast<void>(value[0, 0, 0]); }, TensorError::InvalidShape);
-        expect_tensor_error([&] { static_cast<void>(value.transpose(0, 3)); }, TensorError::IndexOutOfBounds);
-        expect_tensor_error([&] { static_cast<void>(value.reshape(5)); }, TensorError::InvalidShape);
-        expect_tensor_error([&] { static_cast<void>(value.reshape(-1)); }, TensorError::InvalidDimension);
-        expect_tensor_error([&] { static_cast<void>(value.reshape(std::numeric_limits<std::size_t>::max())); },
-                            TensorError::SizeOverflow);
-        expect_tensor_error([&] { static_cast<void>(value.get()); }, TensorError::InvalidShape);
-        expect_tensor_error([&] { static_cast<void>(value.vector()); }, TensorError::InvalidShape);
-        expect_tensor_error([&] { static_cast<void>(value.transpose().reshape(6)); }, TensorError::NonContiguous);
-        auto other = Tensor<float>::create(6);
-        expect_tensor_error([&] { static_cast<void>(value + other); }, TensorError::IncompatibleShapes);
-        expect_tensor_error([&] { static_cast<void>(value + other.view()); }, TensorError::IncompatibleShapes);
-    };
-    check(tensor);
-    check(view);
-    expect_tensor_error([&] { static_cast<void>(view.transpose().data()); }, TensorError::NonContiguous);
+TEST(TensorArithmetic, StridedAndOffsetOperandsAreEvaluatedInLogicalOrder) {
+    auto tensor = sequence();
+    auto left = tensor[1].transpose(0, 1);
+    auto right = tensor[0].transpose(0, 1);
+    auto sum = left + right;
+    auto product = left * right;
+    auto namedSum = left.sum(right);
+    auto namedProduct = left.product(right);
+    EXPECT_TRUE(sum.is_contiguous());
+    EXPECT_EQ(sum.get_shape(), left.get_shape());
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 3; ++j) {
+            const int a = 12 + j * 4 + i;
+            const int b = j * 4 + i;
+            EXPECT_EQ((sum[i, j].get()), a + b);
+            EXPECT_EQ((product[i, j].get()), a * b);
+            EXPECT_EQ((namedSum[i, j].get()), a + b);
+            EXPECT_EQ((namedProduct[i, j].get()), a * b);
+        }
+    sum[0, 0].get() = 70;
+    EXPECT_EQ((tensor[1, 0, 0].get()), 12);
+    expect_tensor_error([&] { static_cast<void>(left + tensor); }, TensorError::IncompatibleShapes,
+                        "Tensor operands must have identical shapes");
+    expect_tensor_error([&] { static_cast<void>(left * tensor); }, TensorError::IncompatibleShapes,
+                        "Tensor operands must have identical shapes");
 }
 
-TEST(TensorArithmetic, OwnersAndStridedViewsAreInterchangeable) {
-    auto tensor = Tensor<double>::create(2, 2);
-    tensor.matrix() << 1.0, 2.0, 3.0, 4.0;
+TEST(TensorArithmetic, ScalarAndEmptyOperands) {
+    Tensor<double> a(Tensor<double>::Shape{}), b(Tensor<double>::Shape{});
+    a.get() = 1.5;
+    b.get() = 2.0;
+    EXPECT_DOUBLE_EQ((a + b).get(), 3.5);
+    EXPECT_DOUBLE_EQ((a * b).get(), 3.0);
+    Tensor<int> empty(0, 3);
+    EXPECT_EQ((empty + empty).get_shape(), empty.get_shape());
+    EXPECT_EQ((empty * empty).get_numel(), 0u);
+}
+
+TEST(TensorAccess, DirectConstScalarAccessIsReadOnly) {
+    Tensor<double> tensor(Tensor<double>::Shape{});
     const auto& readonly = tensor;
-    auto transposed = readonly.transpose();
-    auto bothViews = transposed + transposed;
-    auto ownerView = tensor + transposed;
-    auto viewOwner = transposed + tensor;
-    auto difference = tensor - transposed;
-    auto product = transposed * tensor;
-    auto negative = -transposed;
-    EXPECT_DOUBLE_EQ((bothViews[0, 1].get()), 6.0);
-    EXPECT_DOUBLE_EQ((ownerView[0, 1].get()), 5.0);
-    EXPECT_DOUBLE_EQ((viewOwner[0, 1].get()), 5.0);
-    EXPECT_DOUBLE_EQ((difference[0, 1].get()), -1.0);
-    EXPECT_DOUBLE_EQ((product[0, 1].get()), 6.0);
-    EXPECT_DOUBLE_EQ((negative[0, 1].get()), -3.0);
-    EXPECT_DOUBLE_EQ((tensor[0, 1].get()), 2.0);
-    static_assert(std::is_same_v<decltype(bothViews), Tensor<double>>);
-    auto empty = Tensor<double>::create(2, 0);
-    EXPECT_TRUE((empty + empty.view()).data().empty());
-    auto scalar = Tensor<double>::create(NanoChat::Shape{});
-    scalar.get() = 2.0;
-    auto scalarSum = scalar.view() + scalar;
-    EXPECT_DOUBLE_EQ(scalarSum.get(), 4.0);
+    static_assert(std::is_same_v<decltype(tensor.get()), double&>);
+    static_assert(std::is_same_v<decltype(readonly.get()), const double&>);
+    tensor.get() = 3.5;
+    EXPECT_DOUBLE_EQ(readonly.get(), 3.5);
 }
 
-TEST(TensorValidation, RequirementsComposeInOrder) {
-    using NanoChat::TensorValidation::validate_input;
-    const std::array values{2, 3, 5};
-    int calls = 0;
-    validate_input(values)
-            .require(
-                    [&](const auto& input) {
-                        ++calls;
-                        return std::all_of(input.begin(), input.end(), [](int value) { return value > 0; });
-                    },
-                    TensorError::InvalidDimension, "All dimensions must be positive")
-            .require(
-                    [&](const auto& input) {
-                        ++calls;
-                        return std::accumulate(input.begin(), input.end(), 0) == 10;
-                    },
-                    TensorError::InvalidShape, "Dimensions must sum to 10");
-    EXPECT_EQ(calls, 2);
-    EXPECT_EQ(values, (std::array{2, 3, 5}));
+TEST(TensorArithmetic, OperandsCanHaveDifferentLayouts) {
+    Tensor<int> tensor(2, 2);
+    tensor[0, 0].get() = 1;
+    tensor[0, 1].get() = 2;
+    tensor[1, 0].get() = 3;
+    tensor[1, 1].get() = 4;
+    auto transposed = tensor.transpose(0, 1);
+    auto leftPacked = tensor + transposed;
+    auto rightPacked = transposed + tensor;
+    auto product = tensor * transposed;
+    EXPECT_EQ((leftPacked[0, 1].get()), 5);
+    EXPECT_EQ((rightPacked[1, 0].get()), 5);
+    EXPECT_EQ((product[0, 1].get()), 6);
+    EXPECT_EQ((product[1, 0].get()), 6);
+    product[0, 1].get() = 100;
+    EXPECT_EQ((tensor[0, 1].get()), 2);
 }
 
-TEST(TensorValidation, FirstFailureStopsThePipeline) {
-    using NanoChat::TensorValidation::validate_input;
-    const std::array values{-1, 3, 5};
-    bool laterCalled = false;
-    try {
-        validate_input(values)
-                .require(
-                        [](const auto& input) {
-                            return std::all_of(input.begin(), input.end(), [](int value) { return value > 0; });
-                        },
-                        TensorError::InvalidDimension, "All dimensions must be positive")
-                .require(
-                        [&](const auto&) {
-                            laterCalled = true;
-                            return false;
-                        },
-                        TensorError::InvalidShape, "Dimensions must sum to 10");
-        FAIL() << "Expected validation failure";
-    } catch (const TensorException& error) {
-        EXPECT_EQ(error.code(), TensorError::InvalidDimension);
-        EXPECT_STREQ(error.what(), "All dimensions must be positive");
-    }
-    EXPECT_FALSE(laterCalled);
+namespace {
+    template<typename T>
+    concept CanWriteIndexedScalar = requires(T& tensor) { tensor[0].get() = 1; };
+    template<typename T>
+    concept CanWriteScalar = requires(T& tensor) { tensor.get() = 1; };
+    static_assert(CanWriteIndexedScalar<Tensor<int>>);
+    static_assert(!CanWriteIndexedScalar<const Tensor<int>>);
+    static_assert(!CanWriteIndexedScalar<Tensor<const int>>);
+    static_assert(!CanWriteScalar<Tensor<const int>>);
+    static_assert(!std::is_constructible_v<Tensor<int>, Tensor<const int>>);
+    static_assert(!std::is_convertible_v<decltype(std::declval<Tensor<int>&&>().get()), int&>);
+    static_assert(!std::is_reference_v<decltype(std::declval<const Tensor<int>&&>().get())>);
+} // namespace
+
+TEST(TensorAccess, ConstTransformationsPreserveReadOnlyElementTypes) {
+    auto tensor = sequence();
+    const auto& readonly = tensor;
+    auto slice = readonly[1];
+    auto transposed = readonly.transpose(0, 2);
+    auto permuted = readonly.permute(std::array<std::size_t, 3>{2, 0, 1});
+    auto reshaped = readonly.reshape({6, 4});
+    auto contiguous = readonly.make_contiguous();
+    auto stridedPacked = transposed.make_contiguous();
+    auto stridedReshaped = transposed.reshape({24});
+    static_assert(std::is_same_v<decltype(slice), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(transposed), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(permuted), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(reshaped), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(contiguous), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(stridedPacked), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(stridedReshaped), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(slice.get()), const int&>);
+    EXPECT_EQ((slice[2, 3].get()), 23);
+    EXPECT_EQ((transposed[3, 2, 1].get()), 23);
+    EXPECT_EQ((permuted[3, 1, 2].get()), 23);
+    EXPECT_EQ((reshaped[5, 3].get()), 23);
+    EXPECT_EQ((contiguous[1, 2, 3].get()), 23);
+    tensor[1, 2, 3].get() = 75;
+    EXPECT_EQ((slice[2, 3].get()), 75);
+    auto independent = readonly.clone();
+    static_assert(std::is_same_v<decltype(independent), Tensor<int>>);
+    independent[1, 2, 3].get() = 99;
+    EXPECT_EQ((readonly[1, 2, 3].get()), 75);
+    auto sum = tensor + readonly.transpose(0, 0);
+    EXPECT_EQ((sum[1, 2, 3].get()), 150);
+    auto product = readonly.transpose(0, 0) * tensor;
+    EXPECT_EQ((product[1, 2, 3].get()), 75 * 75);
 }
 
-TEST(TensorValidation, LaterFailureHasItsOwnCodeAndMessage) {
-    using NanoChat::TensorValidation::validate_input;
-    const std::array values{1, 2, 3};
-    try {
-        validate_input(values)
-                .require(
-                        [](const auto& input) {
-                            return std::all_of(input.begin(), input.end(), [](int value) { return value > 0; });
-                        },
-                        TensorError::InvalidDimension, "All dimensions must be positive")
-                .require([](const auto& input) { return std::accumulate(input.begin(), input.end(), 0) == 10; },
-                         TensorError::InvalidShape, "Dimensions must sum to 10");
-        FAIL() << "Expected validation failure";
-    } catch (const TensorException& error) {
-        EXPECT_EQ(error.code(), TensorError::InvalidShape);
-        EXPECT_STREQ(error.what(), "Dimensions must sum to 10");
-    }
-}
-
-TEST(TensorValidation, BorrowsLvaluesAndOwnsTemporaryInputs) {
-    using NanoChat::TensorValidation::validate_input;
-    const auto tensor = Tensor<double>::create(2, 3);
-    validate_input(tensor).require([&](const auto& input) { return &input == &tensor; }, TensorError::InvalidShape,
-                                   "Input should be borrowed");
-    auto check = validate_input(std::vector<int>{2, 3, 5});
-    check.require([](const auto& input) { return std::accumulate(input.begin(), input.end(), 0) == 10; },
-                  TensorError::InvalidShape, "Temporary input must remain alive");
-    auto predicate = [state = std::make_unique<int>(10)](const auto& input) {
-        return std::accumulate(input.begin(), input.end(), 0) == *state;
-    };
-    check.require(std::move(predicate), TensorError::InvalidShape, "Move-only predicates are supported");
-    EXPECT_NO_THROW(NanoChat::TensorValidation::require(true, TensorError::InvalidShape, "Single check"));
-}
-
-TEST(TensorValidation, InvalidIndexFailsBeforeSliceAccess) {
-    auto tensor = Tensor<int>::create(2, 3);
-    expect_tensor_error([&] { static_cast<void>(tensor[-1, 100]); }, TensorError::IndexOutOfBounds);
-    expect_tensor_error([&] { static_cast<void>(tensor[0, -1]); }, TensorError::IndexOutOfBounds);
-    expect_tensor_error([&] { static_cast<void>(tensor[0, 0, -1]); }, TensorError::InvalidShape);
-    expect_tensor_error([&] { Tensor<int>::create(NanoChat::Shape{0, std::numeric_limits<std::size_t>::max()}); },
-                        TensorError::SizeOverflow);
+TEST(TensorAccess, TemporaryScalarResultsRetainStorageRatherThanBorrowReferences) {
+    auto saved = [] {
+        Tensor<int> a(Tensor<int>::Shape{}), b(Tensor<int>::Shape{});
+        a.get() = 7;
+        b.get() = 5;
+        return (a + b).get();
+    }();
+    EXPECT_EQ(static_cast<int>(saved), 12);
+    saved = 90;
+    EXPECT_EQ(static_cast<int>(saved), 90);
+    auto retainedElement = [] { return sequence()[1, 2, 3].get(); }();
+    EXPECT_EQ(static_cast<int>(retainedElement), 23);
+    auto tensor = sequence();
+    auto element = tensor[1, 2, 3].get();
+    auto other = tensor[0, 0, 1].get();
+    element = other; // Assign the value, not the proxy's storage handle.
+    EXPECT_EQ((tensor[1, 2, 3].get()), 1);
+    element = 50;
+    EXPECT_EQ((tensor[0, 0, 1].get()), 1);
+    EXPECT_EQ((tensor[1, 2, 3].get()), 50);
+    const auto scalar = Tensor<int>(Tensor<int>::Shape{});
+    const int& value = std::move(scalar).get(); // A scalar value whose lifetime is extended.
+    EXPECT_EQ(value, 0);
+    auto readonlyElement = [] {
+        const auto source = sequence();
+        return source[1, 2, 3].get();
+    }();
+    static_assert(std::is_same_v<decltype(readonlyElement), int>);
+    EXPECT_EQ(readonlyElement, 23);
 }
