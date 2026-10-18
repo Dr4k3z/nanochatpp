@@ -14,14 +14,17 @@
 
 #include <Eigen/Dense>
 
+#include <type_traits>
 #include "errors.h"
+#include "scalar_reference.h"
 
 namespace NanoChat {
     template<typename Value = float>
     class Tensor {
     public:
+        using Scalar = std::remove_const_t<Value>;
         using Shape = std::vector<std::size_t>;
-        using Storage = Eigen::Matrix<Value, Eigen::Dynamic, 1>;
+        using Storage = Eigen::Matrix<Scalar, Eigen::Dynamic, 1>;
 
         /* Public Constructors */
         explicit Tensor(const Shape& shape) : Tensor(create_tensor_from_shape(shape)) {}
@@ -30,10 +33,134 @@ namespace NanoChat {
             requires(sizeof...(Dims) > 0)
         explicit Tensor(Dims... dims) : Tensor(from_dimensions(dims...)) {}
 
+        // Read-only handles retain the same storage without exposing mutable access.
+        template<typename Other>
+            requires(std::is_const_v<Value> && std::same_as<Other, Scalar>)
+        Tensor(const Tensor<Other>& other) :
+            m_shape(other.m_shape), m_strides(other.m_strides), m_data(other.m_data), m_offset(other.m_offset),
+            m_numel(other.m_numel) {}
+
         /* Data Access APIs and Operators */
         template<std::integral... Indices>
             requires(sizeof...(Indices) > 0)
-        [[nodiscard]] Tensor operator[](Indices... indices) const {
+        [[nodiscard]] Tensor operator[](Indices... indices) & {
+            return indexed(indices...);
+        }
+        template<std::integral... Indices>
+            requires(sizeof...(Indices) > 0)
+        [[nodiscard]] Tensor operator[](Indices... indices) && {
+            return indexed(indices...);
+        }
+        template<std::integral... Indices>
+            requires(sizeof...(Indices) > 0)
+        [[nodiscard]] Tensor<const Scalar> operator[](Indices... indices) const& {
+            return readonly().indexed(indices...);
+        }
+        template<std::integral... Indices>
+            requires(sizeof...(Indices) > 0)
+        [[nodiscard]] Tensor<const Scalar> operator[](Indices... indices) const&& {
+            return readonly().indexed(indices...);
+        }
+
+        Value& get() & { return scalar_reference(); }
+        const Scalar& get() const& { return scalar_reference(); }
+        auto get() && {
+            // Validate rank before returning a storage-owning proxy or scalar value.
+            TensorValidation::require_invariant(get_ndim() == 0, TensorError::InvalidShape,
+                                                "get() requires a rank-zero tensor");
+            if constexpr (std::is_const_v<Value>)
+                return Scalar(scalar_reference());
+            else
+                return ScalarReference<Scalar>(std::move(m_data), m_offset);
+        }
+        Scalar get() const&& { return scalar_reference(); }
+
+        /* Metadata APIs */
+        [[nodiscard]] const Shape& get_shape() const noexcept { return m_shape; }
+        [[nodiscard]] const Shape& get_strides() const noexcept { return m_strides; }
+        [[nodiscard]] std::size_t get_ndim() const noexcept { return m_shape.size(); }
+        [[nodiscard]] std::size_t get_numel() const noexcept { return m_numel; }
+        [[nodiscard]] bool is_contiguous() const noexcept {
+            if (m_numel == 0)
+                return true;
+            std::size_t expected = 1;
+            for (std::size_t axis = get_ndim(); axis-- > 0;) {
+                if (m_shape[axis] > 1 && m_strides[axis] != expected)
+                    return false;
+                if (m_shape[axis] != 0 && expected > std::numeric_limits<std::size_t>::max() / m_shape[axis])
+                    return false;
+                expected *= m_shape[axis];
+            }
+            return true;
+        }
+
+        /* Metadata transformations share storage; const sources return read-only handles. */
+        [[nodiscard]] Tensor transpose(std::size_t axis1, std::size_t axis2) & { return transposed(axis1, axis2); }
+        [[nodiscard]] Tensor transpose(std::size_t axis1, std::size_t axis2) && { return transposed(axis1, axis2); }
+        [[nodiscard]] Tensor<const Scalar> transpose(std::size_t axis1, std::size_t axis2) const& {
+            return readonly().transposed(axis1, axis2);
+        }
+        [[nodiscard]] Tensor<const Scalar> transpose(std::size_t axis1, std::size_t axis2) const&& {
+            return readonly().transposed(axis1, axis2);
+        }
+        [[nodiscard]] Tensor permute(std::span<const std::size_t> axes) & { return permuted(axes); }
+        [[nodiscard]] Tensor permute(std::span<const std::size_t> axes) && { return permuted(axes); }
+        [[nodiscard]] Tensor<const Scalar> permute(std::span<const std::size_t> axes) const& {
+            return readonly().permuted(axes);
+        }
+        [[nodiscard]] Tensor<const Scalar> permute(std::span<const std::size_t> axes) const&& {
+            return readonly().permuted(axes);
+        }
+        /// Preserve logical row-major order: share contiguous data, copy strided data.
+        [[nodiscard]] Tensor reshape(const Shape& shape) & { return reshaped(shape); }
+        /// Preserve logical row-major order: share contiguous data, copy strided data.
+        [[nodiscard]] Tensor reshape(const Shape& shape) && { return reshaped(shape); }
+        [[nodiscard]] Tensor<const Scalar> reshape(const Shape& shape) const& { return readonly().reshaped(shape); }
+        [[nodiscard]] Tensor<const Scalar> reshape(const Shape& shape) const&& { return readonly().reshaped(shape); }
+        /// Ensure a contiguous layout; already-contiguous storage stays shared. Use clone() to always copy.
+        [[nodiscard]] Tensor make_contiguous() & { return packed(); }
+        /// Ensure a contiguous layout; already-contiguous storage stays shared. Use clone() to always copy.
+        [[nodiscard]] Tensor make_contiguous() && { return packed(); }
+        [[nodiscard]] Tensor<const Scalar> make_contiguous() const& { return readonly().packed(); }
+        [[nodiscard]] Tensor<const Scalar> make_contiguous() const&& { return readonly().packed(); }
+
+        /* Data Ownership Transformations */
+        /// Return an independent mutable copy in logical row-major order.
+        [[nodiscard]] Tensor<Scalar> clone() const {
+            Tensor<Scalar> result(m_shape);
+            for (std::size_t i = 0; i < m_numel; ++i)
+                (*result.m_data)[static_cast<Eigen::Index>(i)] = element_at_linear(i);
+            return result;
+        }
+
+        /* Arithmetic materializes mutable results, even from read-only operands. */
+        template<typename Other>
+            requires std::same_as<std::remove_const_t<Other>, Scalar>
+        [[nodiscard]] Tensor<Scalar> sum(const Tensor<Other>& other) const {
+            return elementwise(other, [](const Scalar& a, const Scalar& b) { return a + b; });
+        }
+        template<typename Other>
+            requires std::same_as<std::remove_const_t<Other>, Scalar>
+        [[nodiscard]] Tensor<Scalar> product(const Tensor<Other>& other) const {
+            return elementwise(other, [](const Scalar& a, const Scalar& b) { return a * b; });
+        }
+        template<typename Other>
+            requires std::same_as<std::remove_const_t<Other>, Scalar>
+        [[nodiscard]] Tensor<Scalar> operator+(const Tensor<Other>& other) const {
+            return sum(other);
+        }
+        template<typename Other>
+            requires std::same_as<std::remove_const_t<Other>, Scalar>
+        [[nodiscard]] Tensor<Scalar> operator*(const Tensor<Other>& other) const {
+            return product(other);
+        }
+
+    private:
+        template<typename>
+        friend class Tensor;
+        Tensor<const Scalar> readonly() const { return Tensor<const Scalar>(m_data, m_shape, m_strides, m_offset); }
+        template<std::integral... Indices>
+        Tensor indexed(Indices... indices) const {
             constexpr auto n = sizeof...(Indices);
             TensorValidation::require_invariant(n <= get_ndim(), TensorError::IndexOutOfBounds,
                                                 "Too many indices for tensor rank");
@@ -55,33 +182,8 @@ namespace NanoChat {
             return Tensor(m_data, std::move(newShape), std::move(newStrides), offset);
         }
 
-        // NOTE are these needed?
-        Value& get() & { return scalar_reference(); }
-        const Value& get() const& { return scalar_reference(); }
-        Value& get() && { return scalar_reference(); }
-        const Value& get() const&& { return scalar_reference(); }
-
-        /* Metadata APIs */
-        [[nodiscard]] const Shape& get_shape() const noexcept { return m_shape; }
-        [[nodiscard]] const Shape& get_strides() const noexcept { return m_strides; }
-        [[nodiscard]] std::size_t get_ndim() const noexcept { return m_shape.size(); }
-        [[nodiscard]] std::size_t get_numel() const noexcept { return m_numel; }
-        [[nodiscard]] bool is_contiguous() const noexcept {
-            if (m_numel == 0)
-                return true;
-            std::size_t expected = 1;
-            for (std::size_t axis = get_ndim(); axis-- > 0;) {
-                if (m_shape[axis] > 1 && m_strides[axis] != expected)
-                    return false;
-                if (m_shape[axis] != 0 && expected > std::numeric_limits<std::size_t>::max() / m_shape[axis])
-                    return false;
-                expected *= m_shape[axis];
-            }
-            return true;
-        }
-
         /* Metadata Transformation Methods */
-        [[nodiscard]] Tensor transpose(std::size_t axis_1, std::size_t axis_2) const {
+        [[nodiscard]] Tensor transposed(std::size_t axis_1, std::size_t axis_2) const {
             TensorValidation::require_invariant(axis_1 < get_ndim() && axis_2 < get_ndim(),
                                                 TensorError::IndexOutOfBounds, "Transpose axes outside rank");
 
@@ -90,7 +192,7 @@ namespace NanoChat {
             std::swap(result.m_strides[axis_1], result.m_strides[axis_2]);
             return result;
         }
-        [[nodiscard]] Tensor permute(std::span<const std::size_t> axes) const {
+        [[nodiscard]] Tensor permuted(std::span<const std::size_t> axes) const {
             TensorValidation::require_invariant(axes.size() == get_ndim(), TensorError::InvalidShape,
                                                 "Permutation must include every axis");
 
@@ -108,40 +210,20 @@ namespace NanoChat {
             }
             return Tensor(m_data, std::move(shape), std::move(strides), m_offset);
         }
-        [[nodiscard]] Tensor reshape(const Shape& shape) const {
+        [[nodiscard]] Tensor reshaped(const Shape& shape) const {
             TensorValidation::require_invariant(checked_numel(shape) == m_numel, TensorError::InvalidShape,
                                                 "Reshape must preserve the number of elements");
             if (!is_contiguous())
-                return make_contiguous().reshape(shape);
+                return Tensor(clone().reshaped(shape));
             return Tensor(m_data, shape, row_major_strides(shape), m_offset);
         }
-        [[nodiscard]] Tensor make_contiguous() const {
+        [[nodiscard]] Tensor packed() const {
             if (is_contiguous())
                 return *this; // shared-storage view, not a copy
             return clone();
         }
 
-        /* Data Ownership Transformations */
-        [[nodiscard]] Tensor clone() const {
-            Tensor result(m_shape);
-            for (std::size_t i = 0; i < m_numel; ++i)
-                (*result.m_data)[static_cast<Eigen::Index>(i)] = element_at_linear(i);
-            return result;
-        }
 
-        /* Math Operations */
-        [[nodiscard]] Tensor sum(const Tensor& other) const {
-            return elementwise(other, [](const Value& a, const Value& b) { return a + b; });
-        }
-        [[nodiscard]] Tensor product(const Tensor& other) const {
-            return elementwise(other, [](const Value& a, const Value& b) { return a * b; });
-        }
-
-        /* Math Overloaded Operators */
-        [[nodiscard]] Tensor operator+(const Tensor& other) const { return sum(other); }
-        [[nodiscard]] Tensor operator*(const Tensor& other) const { return product(other); }
-
-    private:
         Shape m_shape;
         Shape m_strides;
         std::shared_ptr<Storage> m_data;
@@ -248,13 +330,13 @@ namespace NanoChat {
             return (*m_data)[static_cast<Eigen::Index>(m_offset)];
         }
 
-        const Value& scalar_reference() const {
+        const Scalar& scalar_reference() const {
             TensorValidation::require_invariant(get_ndim() == 0, TensorError::InvalidShape,
                                                 "get() requires a rank-zero tensor");
             return (*m_data)[static_cast<Eigen::Index>(m_offset)];
         }
 
-        const Value& element_at_linear(std::size_t linear) const {
+        const Scalar& element_at_linear(std::size_t linear) const {
             std::size_t offset = m_offset;
             for (std::size_t axis = get_ndim(); axis-- > 0;) {
                 offset += (linear % m_shape[axis]) * m_strides[axis];
@@ -263,11 +345,11 @@ namespace NanoChat {
             return (*m_data)[static_cast<Eigen::Index>(offset)];
         }
 
-        template<typename Operation>
-        Tensor elementwise(const Tensor& other, Operation op) const {
+        template<typename Other, typename Operation>
+        Tensor<Scalar> elementwise(const Tensor<Other>& other, Operation op) const {
             TensorValidation::require_invariant(m_shape == other.m_shape, TensorError::IncompatibleShapes,
                                                 "Tensor operands must have identical shapes");
-            Tensor result(m_shape);
+            Tensor<Scalar> result(m_shape);
             for (std::size_t i = 0; i < m_numel; ++i)
                 (*result.m_data)[static_cast<Eigen::Index>(i)] = op(element_at_linear(i), other.element_at_linear(i));
             return result;

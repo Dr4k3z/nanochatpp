@@ -50,7 +50,7 @@ TEST(TensorConstruction, ShapeAndDimensionsAgreeAndInitializeToZero) {
 TEST(TensorConstruction, SupportsScalarTypesAndMixedIntegralDimensions) {
     Tensor<double> tensor(2u, std::size_t{3});
     tensor[1, 2].get() = 1.25;
-    static_assert(std::is_same_v<decltype(tensor[1, 2].get()), double&>);
+    static_assert(std::is_convertible_v<decltype(tensor[1, 2].get()), double>);
     EXPECT_DOUBLE_EQ((tensor[1, 2].get()), 1.25);
     Tensor<int> integers(1);
     integers[0].get() = 7;
@@ -321,4 +321,84 @@ TEST(TensorArithmetic, OperandsCanHaveDifferentLayouts) {
     EXPECT_EQ((product[1, 0].get()), 6);
     product[0, 1].get() = 100;
     EXPECT_EQ((tensor[0, 1].get()), 2);
+}
+
+namespace {
+    template<typename T>
+    concept CanWriteIndexedScalar = requires(T& tensor) { tensor[0].get() = 1; };
+    template<typename T>
+    concept CanWriteScalar = requires(T& tensor) { tensor.get() = 1; };
+    static_assert(CanWriteIndexedScalar<Tensor<int>>);
+    static_assert(!CanWriteIndexedScalar<const Tensor<int>>);
+    static_assert(!CanWriteIndexedScalar<Tensor<const int>>);
+    static_assert(!CanWriteScalar<Tensor<const int>>);
+    static_assert(!std::is_constructible_v<Tensor<int>, Tensor<const int>>);
+    static_assert(!std::is_convertible_v<decltype(std::declval<Tensor<int>&&>().get()), int&>);
+    static_assert(!std::is_reference_v<decltype(std::declval<const Tensor<int>&&>().get())>);
+} // namespace
+
+TEST(TensorAccess, ConstTransformationsPreserveReadOnlyElementTypes) {
+    auto tensor = sequence();
+    const auto& readonly = tensor;
+    auto slice = readonly[1];
+    auto transposed = readonly.transpose(0, 2);
+    auto permuted = readonly.permute(std::array<std::size_t, 3>{2, 0, 1});
+    auto reshaped = readonly.reshape({6, 4});
+    auto contiguous = readonly.make_contiguous();
+    auto stridedPacked = transposed.make_contiguous();
+    auto stridedReshaped = transposed.reshape({24});
+    static_assert(std::is_same_v<decltype(slice), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(transposed), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(permuted), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(reshaped), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(contiguous), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(stridedPacked), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(stridedReshaped), Tensor<const int>>);
+    static_assert(std::is_same_v<decltype(slice.get()), const int&>);
+    EXPECT_EQ((slice[2, 3].get()), 23);
+    EXPECT_EQ((transposed[3, 2, 1].get()), 23);
+    EXPECT_EQ((permuted[3, 1, 2].get()), 23);
+    EXPECT_EQ((reshaped[5, 3].get()), 23);
+    EXPECT_EQ((contiguous[1, 2, 3].get()), 23);
+    tensor[1, 2, 3].get() = 75;
+    EXPECT_EQ((slice[2, 3].get()), 75);
+    auto independent = readonly.clone();
+    static_assert(std::is_same_v<decltype(independent), Tensor<int>>);
+    independent[1, 2, 3].get() = 99;
+    EXPECT_EQ((readonly[1, 2, 3].get()), 75);
+    auto sum = tensor + readonly.transpose(0, 0);
+    EXPECT_EQ((sum[1, 2, 3].get()), 150);
+    auto product = readonly.transpose(0, 0) * tensor;
+    EXPECT_EQ((product[1, 2, 3].get()), 75 * 75);
+}
+
+TEST(TensorAccess, TemporaryScalarResultsRetainStorageRatherThanBorrowReferences) {
+    auto saved = [] {
+        Tensor<int> a(Tensor<int>::Shape{}), b(Tensor<int>::Shape{});
+        a.get() = 7;
+        b.get() = 5;
+        return (a + b).get();
+    }();
+    EXPECT_EQ(static_cast<int>(saved), 12);
+    saved = 90;
+    EXPECT_EQ(static_cast<int>(saved), 90);
+    auto retainedElement = [] { return sequence()[1, 2, 3].get(); }();
+    EXPECT_EQ(static_cast<int>(retainedElement), 23);
+    auto tensor = sequence();
+    auto element = tensor[1, 2, 3].get();
+    auto other = tensor[0, 0, 1].get();
+    element = other; // Assign the value, not the proxy's storage handle.
+    EXPECT_EQ((tensor[1, 2, 3].get()), 1);
+    element = 50;
+    EXPECT_EQ((tensor[0, 0, 1].get()), 1);
+    EXPECT_EQ((tensor[1, 2, 3].get()), 50);
+    const auto scalar = Tensor<int>(Tensor<int>::Shape{});
+    const int& value = std::move(scalar).get(); // A scalar value whose lifetime is extended.
+    EXPECT_EQ(value, 0);
+    auto readonlyElement = [] {
+        const auto source = sequence();
+        return source[1, 2, 3].get();
+    }();
+    static_assert(std::is_same_v<decltype(readonlyElement), int>);
+    EXPECT_EQ(readonlyElement, 23);
 }
